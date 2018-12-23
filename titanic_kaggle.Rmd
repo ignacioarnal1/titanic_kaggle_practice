@@ -1,0 +1,175 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+# Some notes on the data
+**survived:**
+0 = No
+1 = Yes
+
+**pclass**: A proxy for socio-economic status (SES)
+1st = Upper
+2nd = Middle
+3rd = Lower
+
+**age**: Age is fractional if less than 1. If the age is estimated, is it in the form of xx.5
+
+**sibsp**: The dataset defines family relations in this way...
+Sibling = brother, sister, stepbrother, stepsister
+Spouse = husband, wife (mistresses and fiancés were ignored)
+
+**parch:** The dataset defines family relations in this way...
+Parent = mother, father
+Child = daughter, son, stepdaughter, stepson
+Some children travelled only with a nanny, therefore parch=0 for them.
+
+**embarked:** what is the port where the person embarked from
+C = Cherbourg, Q = Queenstown, S = Southampton
+
+```{r libraries}
+library(ggplot2)
+library(dplyr)
+library(corrplot)
+```
+
+```{r data_loads}
+# reading the data of the competition
+train <- read.csv('all/train.csv')
+```
+
+```{r basic_exploration}
+# types of data
+str(train)
+
+# size of the dataset
+dim(train)
+# 891 rows and 12 variables
+
+# amount of NA's per column
+colSums(is.na(train))[colSums(is.na(train)) > 0]
+# only Age has NA's
+
+# how balanced is the dataset ...
+round(table(train$Survived) / dim(train)[1] * 100, 1)
+```
+
+Some points about the data:
+- 891 Rows, 12 Variables
+- Only Age has NA's ... and it's 177 our of the 891 rows of data!
+- 61.6% doesn't survive, 38.4% survives
+
+```{r dataTransformations}
+
+# Family properties  ----
+# CHILDs ====
+# we separate children from adults, we use the age as a variable. And stablish that <16 is a child.
+# we verify this assumption by making sure that children labeled don't have more than 3 parents...
+# we also know that people with n_parents = 0 were travelling with a nanny; therefore being children. So we also use that rule
+
+# Verifying child assumption
+train %>%
+  mutate(
+    child = (Age < 16) * 1 | (Parch == 0 & Age < 16)
+  ) %>%
+  group_by(child) %>%
+  summarise(
+    n_parents = paste(unique(Parch), collapse = ", ")
+  )
+# people without a label (NA) just like children, have a maximum of 2 parents... could these people have possibly been children?
+
+# let's analyze the distribution of Age
+train %>%
+  group_by(Pclass, Sex) %>%
+  summarise(
+    median_Age = median(Age, na.rm = T)
+  ) -> ageMedians
+
+# We can see that different classes and sexes have different medians of ages...
+# we shall replace NA's in accordance to sexes and classes, so that it reflects better the age distribution of their characteristics
+(train %>%
+  left_join(
+    ageMedians
+  ) %>%
+  mutate(
+    inputAge = ifelse(is.na(Age), median_Age, Age)
+  ))$inputAge -> inputAge
+
+# Name information ====
+# the name tag has information about marital status, job (Dr., Col, etc.) and other features (Master?)
+
+# luckily, all of the titles of either the job or marital status have a . at the end. We can easily extract them
+getDotName <- function(x){
+  strsplit(x, " ")
+  x[grep("\\.", x)]
+}
+
+nameList <- strsplit(as.character(train$Name), " ")
+nameList <- lapply(nameList, function(x) x[grep("\\.", x)][1])
+nameList <- unlist(nameList)
+rev(sort(table(nameList)))
+
+# several new variables can be created...
+# spouse, military, master, Dr., Rev.
+
+# Cabin info ====
+rev(sort(table(train$Cabin)))
+# 687 persons have no cabin register... the 200 less have cabins all over the place. We will simplify and create two variables:
+# the letter for the section
+# the number for the cabin location
+# some passengers have multiple cabin information, to simplify we just grab the first letter
+
+# getting cabin numbers ####
+getCabinNumber <- function(x){
+  strsplit(x, " ")
+}
+
+cabinNumbers <- lapply(as.character(train$Cabin), getCabinNumber)
+cabinNumbers <- sapply(cabinNumbers, function(x) x[[1]][1])
+cabinNumbers <- gsub("[^0-9]", "", cabinNumbers)
+cabinNumbers[cabinNumbers == ''] <- NA
+cabinNumbers <- as.numeric(cabinNumbers)
+#medianCabin <- median(as.numeric(cabinNumbers[!is.na(cabinNumbers)]), na.rm = T)
+#cabinNumbers[is.na(cabinNumbers)] <- medianCabin
+
+# FINAL TRANSFORMATION ----
+# all of the transformations
+train %>% mutate(
+  Age = inputAge,
+  child = ((Age < 16) | (Parch == 0 & Age < 16)) * 1,
+  spouse = (nameList %in% c("Mrs.", "Mlle.", "Lady.")) * 1,
+  single_woman = (nameList %in% c("Miss.", "Mmme.")) * 1,
+  master = (nameList == "Master.") * 1,
+  job_title = nameList %in% c("Dr.", "Rev.", "Major.", "Col.", "Capt.", "L.") * 1,
+  noble = nameList %in% c("Sir.", "Lady.", "Don.", "Countess.", "Jonkheer") * 1,
+  mister = (nameList %in% 'Mr.') * 1,
+  cabin_letter = ifelse(substr(Cabin, 1, 1) == '', NA, substr(Cabin, 1, 1)),
+  cabin_numbers = cabinNumbers
+) -> train2
+
+# we're going to get rid of columns that don't provide value
+train2$PassengerId <- NULL
+train2$Name <- NULL
+train2$Cabin <- NULL
+train2$Ticket <- NULL
+```
+
+We're doing some data exploration now, to understand the relationship between the different variables
+
+```{r data_exploration}
+# get only the numeric variables
+corrplot(cor(Filter(is.numeric, train2)))
+
+numeric_df <- Filter(is.numeric, train2)
+dim(numeric_df)
+
+par(mfrow = c(4, 4))
+for(i in 1:dim(numeric_df)[2]){
+  if(length(unique(numeric_df[,i])) < 10){
+   barplot(table(unlist(numeric_df[,i])), names = names(numeric_df)[i]) 
+  }else{
+   hist(unlist(numeric_df[,i]), main = names(numeric_df)[i]) 
+  }
+}
+```
+

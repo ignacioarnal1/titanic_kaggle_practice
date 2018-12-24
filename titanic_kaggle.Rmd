@@ -31,11 +31,22 @@ C = Cherbourg, Q = Queenstown, S = Southampton
 library(ggplot2)
 library(dplyr)
 library(corrplot)
+library(fastDummies)
+library(ROCR)
 ```
 
 ```{r data_loads}
 # reading the data of the competition
 train <- read.csv('all/train.csv')
+test <- read.csv('all/test.csv')
+
+names(train)
+train$is_train <- TRUE
+test$is_train <- FALSE
+test$Survived <- NA
+
+# let's make sure that we do the same transformations to both training and test ...
+train <- bind_rows(train, test)
 ```
 
 ```{r basic_exploration}
@@ -80,6 +91,7 @@ train %>%
 
 # let's analyze the distribution of Age
 train %>%
+  filter(is_train == TRUE) %>%
   group_by(Pclass, Sex) %>%
   summarise(
     median_Age = median(Age, na.rm = T)
@@ -144,7 +156,10 @@ train %>% mutate(
   noble = nameList %in% c("Sir.", "Lady.", "Don.", "Countess.", "Jonkheer") * 1,
   mister = (nameList %in% 'Mr.') * 1,
   cabin_letter = ifelse(substr(Cabin, 1, 1) == '', NA, substr(Cabin, 1, 1)),
-  cabin_numbers = cabinNumbers
+  cabin_numbers = cabinNumbers,
+  male = (Sex == "male") * 1,
+  Sex = NULL,
+  cabin_letter = as.factor(cabin_letter)
 ) -> train2
 
 # we're going to get rid of columns that don't provide value
@@ -152,6 +167,14 @@ train2$PassengerId <- NULL
 train2$Name <- NULL
 train2$Cabin <- NULL
 train2$Ticket <- NULL
+
+# Let's transform the dataset into a dummy dataframe
+dummy_df <- dummy_cols(Filter(is.factor, train2), remove_first_dummy = T)
+
+train2 <- cbind(train2, dummy_df[,-c(1, 2)])
+
+train2$Embarked <- NULL
+train2$cabin_letter <- NULL
 ```
 
 We're doing some data exploration now, to understand the relationship between the different variables
@@ -163,13 +186,79 @@ corrplot(cor(Filter(is.numeric, train2)))
 numeric_df <- Filter(is.numeric, train2)
 dim(numeric_df)
 
-par(mfrow = c(4, 4))
+# we can see that we have a couple of metrics that are correlated... we will get rid of them.
+train2$mister <- NULL
+```
+
+Interesting findings:
+1- Cabin A seems to be correlated with noble people and neg corr with class. Meaning probably most higher class person were staying in this cabin number
+2- Master and child seem to be very correlated, (Just found out this was a way of calling kids, whoops!)
+3- Mister. and male sex are correlated (Which is obvious)
+4- Most cabin information seems to be correlated similarly, implying that those who had cabins registered probably share a lot of characteristics. We will most likely elliminate or simplify this metric after checking it's performance within a model
+
+```{r dist plots}
+par(mfrow = c(2, 2))
 for(i in 1:dim(numeric_df)[2]){
   if(length(unique(numeric_df[,i])) < 10){
-   barplot(table(unlist(numeric_df[,i])), names = names(numeric_df)[i]) 
+   barplot(table(unlist(train2[,i])), main = names(numeric_df)[i]) 
   }else{
-   hist(unlist(numeric_df[,i]), main = names(numeric_df)[i]) 
+   hist(unlist(train2[,i]), main = names(numeric_df)[i]) 
   }
 }
+```
+
+Model trainings
+```{r model_training}
+# let's separate in train, test and validation
+randomDraw <- runif(dim(train2)[1]) < 0.6
+train2$has_cabin <- rowSums(train2[,17:22])
+train2[,17:22] <- NULL
+train2$cabin_numbers <- NULL
+train2$cabin_letter_T <- NULL
+
+# scaling the data!!!
+train2 %>% select(Age, Fare) %>% scale() -> scaled_data
+
+scaled_data <- matrix(scaled_data, ncol = 2)
+scaled_data <-  data.frame(
+  'age_scaled' = scaled_data[,1],
+  'fare_scaled' = scaled_data[,2]
+)
+train2 <- cbind(train2, scaled_data)
+train2$Age <- NULL
+train2$Fare <- NULL
+
+train2 %>% filter(is_train == F) -> validation
+train2 %>% filter(is_train == T & randomDraw == T) -> train
+train2 %>% filter(is_train == T & randomDraw == F) -> test
+
+# let's try a  logistic model, random forest and xgboost
+mylogit <- glm(Survived ~ ., data = train, family = "binomial")
+steps_mylogit <- step(mylogit)
+
+# these are the steps I want to keep
+#mylogit <- glm(formula = Survived ~ Pclass + Age + SibSp + Parch + Fare + 
+#    single_woman + master + male + has_cabin, family = "binomial", 
+#    data = train)
+
+mylogit2 <- glm(formula = Survived ~ Pclass + Age + SibSp + single_woman + 
+    master + male + has_cabin, family = "binomial", data = train)
+
+predictions <- (predict(mylogit, test,  type = 'response') > 0.5) * 1
+predictions2 <- (predict(mylogit2, test,  type = 'response') > 0.5) * 1
+
+accuracy <- 1 - mean(predictions != test$Survived)
+accuracy2 <- 1 - mean(predictions2 != test$Survived)
+```
+
+```{r performance_logit_regression}
+p <- predict(mylogit2, test, type="response")
+pr <- prediction(p, test$Survived)
+prf <- performance(pr, measure = "tpr", x.measure = "fpr")
+plot(prf)
+
+auc <- performance(pr, measure = "auc")
+auc <- auc@y.values[[1]]
+auc
 ```
 
